@@ -4,6 +4,7 @@ import argparse
 from modules.passive import whois_lookup, dns_enumeration, subdomain_enum
 from modules.active  import port_scan, http_headers, tech_detect
 from modules.fuzzing import dir_fuzzer, sensitive_finder
+from modules.report  import generate_report
 
 
 def main():
@@ -42,6 +43,12 @@ def main():
                         help="Extensions for --dirfuzz. e.g. --ext php bak html")
     parser.add_argument("--threads", type=int, default=20, metavar="N",
                         help="Threads for fuzzing (default: 20)")
+    parser.add_argument("--codes", nargs="+", type=int, metavar="CODE",
+                        help="HTTP codes to show (default: all interesting). e.g. --codes 200 403")
+
+    # ── output ────────────────────────────────────────────────
+    parser.add_argument("--no-report", action="store_true",
+                        help="Do not save report to output/")
 
     args = parser.parse_args()
 
@@ -55,38 +62,50 @@ def main():
     run_passive = run_all or args.passive
     run_active  = run_all or args.active
     run_fuzz    = run_all or args.fuzz
+    show_codes  = set(args.codes) if args.codes else None
+
+    results = {}
 
     # ── passive ───────────────────────────────────────────────
     if run_passive or args.whois:
-        whois_lookup(args.domain)
+        results["whois"] = whois_lookup(args.domain)
 
     if run_passive or args.dns:
-        dns_enumeration(args.domain, record_types=args.types or None)
+        results["dns"] = dns_enumeration(args.domain, record_types=args.types or None)
 
     if run_passive or args.subdomains:
-        subdomain_enum(args.domain)
+        results["subdomains"] = subdomain_enum(args.domain)
 
     # ── active ────────────────────────────────────────────────
     if run_active or args.ports:
-        port_scan(args.domain, ports=args.port_range)
+        results["ports"] = port_scan(args.domain, ports=args.port_range)
 
     if run_active or args.headers:
-        http_headers(args.domain)
+        results["headers"] = http_headers(args.domain)
 
     if run_active or args.tech:
-        tech_detect(args.domain)
+        results["tech"] = tech_detect(args.domain)
 
     # ── fuzzing ───────────────────────────────────────────────
     if run_fuzz or args.dirfuzz:
-        dir_fuzzer(
+        results["dirfuzz"] = dir_fuzzer(
             target=args.domain,
             wordlist=args.wordlist or "/usr/share/dirb/wordlists/common.txt",
             extensions=args.ext or [],
             threads=args.threads,
+            show_codes=show_codes,
         )
 
     if run_fuzz or args.sensitive:
-        sensitive_finder(target=args.domain, threads=args.threads)
+        results["sensitive"] = sensitive_finder(
+            target=args.domain,
+            threads=args.threads,
+            show_codes=show_codes,
+        )
+
+    # ── rapport ───────────────────────────────────────────────
+    if results and not args.no_report:
+        generate_report(args.domain, results)
 
 
 if __name__ == "__main__":

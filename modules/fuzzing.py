@@ -1,6 +1,8 @@
 import requests
 import urllib3
 import os
+import random
+import string
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -84,23 +86,30 @@ def dir_fuzzer(
             ext = ext if ext.startswith(".") else f".{ext}"
             paths.append(f"{word}{ext}")
 
-    if verbose:
-        _print_fuzzer_header(result, total_paths=len(paths))
-
     session = requests.Session()
     session.headers.update(HEADERS)
+
+    # Wildcard / catch-all detection
+    baseline = _detect_wildcard(session, target)
+
+    if verbose:
+        _print_fuzzer_header(result, total_paths=len(paths), baseline=baseline)
 
     def probe(path: str):
         url = f"{target}/{path}"
         try:
             r = session.get(url, timeout=TIMEOUT, verify=False, allow_redirects=False)
-            return {
+            hit = {
                 "url":      url,
                 "path":     f"/{path}",
                 "code":     r.status_code,
                 "size":     len(r.content),
                 "redirect": r.headers.get("Location", ""),
             }
+            # Filter out wildcard responses
+            if baseline and _is_wildcard_response(hit, baseline, path):
+                return None
+            return hit
         except requests.RequestException:
             return None
 
@@ -130,6 +139,7 @@ def sensitive_finder(
     target: str,
     wordlist: str = SENSITIVE_WORDLIST,
     threads: int = 20,
+    show_codes: set | None = None,
     verbose: bool = True,
 ) -> dict:
     """
@@ -141,7 +151,7 @@ def sensitive_finder(
         wordlist=wordlist,
         extensions=[],
         threads=threads,
-        show_codes={200, 201, 301, 302, 403},
+        show_codes=show_codes or {200, 201, 301, 302, 403},
         verbose=verbose,
     )
 
@@ -149,6 +159,66 @@ def sensitive_finder(
 # ─────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────
+
+def _random_path(length: int = 16) -> str:
+    return "".join(random.choices(string.ascii_lowercase, k=length))
+
+
+def _detect_wildcard(session: requests.Session, target: str) -> dict | None:
+    """
+    Send 2 requests to random non-existent paths.
+    If both return the same code and similar redirect pattern → catch-all detected.
+    Returns a baseline dict or None if no wildcard.
+    """
+    probes = []
+    for _ in range(2):
+        path = _random_path()
+        url  = f"{target}/{path}"
+        try:
+            # Same settings as probe() — no redirect following
+            r = session.get(url, timeout=TIMEOUT, verify=False, allow_redirects=False)
+            probes.append({
+                "code":     r.status_code,
+                "size":     len(r.content),
+                "redirect": r.headers.get("Location", ""),
+                "path":     path,
+            })
+        except requests.RequestException:
+            return None
+
+    if len(probes) < 2:
+        return None
+
+    # Same code on both random paths → catch-all
+    if probes[0]["code"] == probes[1]["code"]:
+        # Check if redirect contains the path (pattern: target/{any_path})
+        redirect_is_dynamic = (
+            probes[0]["path"] in probes[0]["redirect"] and
+            probes[1]["path"] in probes[1]["redirect"]
+        )
+        return {
+            "code":              probes[0]["code"],
+            "size":              probes[0]["size"],
+            "redirect_dynamic":  redirect_is_dynamic,
+            "redirect_prefix":   probes[0]["redirect"].replace(probes[0]["path"], "") if redirect_is_dynamic else "",
+        }
+    return None
+
+
+def _is_wildcard_response(hit: dict, baseline: dict, path: str) -> bool:
+    """Return True if the hit matches the wildcard baseline (should be filtered out)."""
+    if hit["code"] != baseline["code"]:
+        return False
+    # Dynamic redirect: same prefix + current path → wildcard
+    if baseline["redirect_dynamic"]:
+        expected = baseline["redirect_prefix"] + path
+        if hit["redirect"].rstrip("/") == expected.rstrip("/"):
+            return True
+    # Same code and same size → wildcard
+    if abs(hit["size"] - baseline["size"]) <= 10:
+        return True
+    return False
+
 
 def _normalize_url(target: str) -> str:
     target = target.rstrip("/")
@@ -165,12 +235,14 @@ def _load_wordlist(path: str) -> list | None:
         return f.readlines()
 
 
-def _print_fuzzer_header(result: dict, total_paths: int = 0):
+def _print_fuzzer_header(result: dict, total_paths: int = 0, baseline: dict | None = None):
     print(f"\n{'='*60}")
     print(f"  Dir/File Fuzzer — {result['target']}")
     print(f"  Wordlist : {result['wordlist']}")
     if total_paths:
         print(f"  Paths    : {total_paths}")
+    if baseline:
+        print(f"  \033[93m[!] Catch-all detected (HTTP {baseline['code']}) — wildcard responses filtered\033[0m")
     print(f"{'='*60}")
     if result["error"]:
         print(f"  [!] {result['error']}")
