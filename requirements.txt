@@ -1,0 +1,5 @@
+python-whois==0.9.3
+dnspython==2.7.0
+requests==2.32.5
+python-nmap==0.7.1
+urllib3
